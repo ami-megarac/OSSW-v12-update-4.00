@@ -1,0 +1,207 @@
+--- uboot/oem/ami/fmh/cmd_fmh.c	2020-07-23 21:33:24.141819067 +0530
++++ uboot_new/oem/ami/fmh/cmd_fmh.c	2020-07-23 21:50:40.215566156 +0530
+@@ -23,6 +23,8 @@
+ 
+ # define  KERNEL_LOADADDR	0xC00000
+ # define  KERNEL_FILE		"/boot/uImage"
++# define CONFIG_SYS_LOAD_DTB_ADDR        0X84000000
++# define  KERNEL_DTB           "/boot/kernel.dtb"
+ 
+ 
+ # define AUTO_HIGH_VER_FW          	0x0
+@@ -808,6 +810,9 @@
+ 	int rootisinitrd = 0; /*indicates root is actually an initrd*/
+     char *side = NULL;
+     u8 golden_side;
++#ifdef CONFIG_OF_LIBFDT
++	char DTBAddr[11] = { 0 };
++#endif
+ 
+ #ifdef CONFIG_YAFU_SUPPORT
+ 	int  boot_fwupd = 0;
+@@ -822,6 +827,9 @@
+ 	int devicenumber =0;
+ 	char partition[128] = {0};
+ 	char *bootselect = NULL;
++#ifdef CONFIG_OF_LIBFDT
++	char AddrStr2[128] = "0xFFFFFFFF";
++#endif
+ #endif
+ 
+ 	sprintf(baudrate_str,"%d",CONFIG_BAUDRATE);
+@@ -949,6 +957,32 @@
+ 		strncpy((char *)mod_Name,(char *)mod->Module_Name,sizeof(mod->Module_Name));
+ 		mod_Name[sizeof(mod->Module_Name)]=0;
+ 
++#ifdef CONFIG_OF_LIBFDT
++		/* DTB has module type value same as FPGA, so we check for module type
++		 * first and then check module name to confirm whether we deal with DTB */
++		if ((le16_to_host(mod->Module_Type) == MODULE_FPGA))
++		{
++			/* Check whether the module name matches to DTB */
++			if (strncasecmp((char *)mod_Name, "DTB", 3) == 0)
++			{
++				/* Found DTB section in FMH, get the address of FMH start
++				 * as we need to pass this address to the 'bootm' command
++				 * to continue kernel boot using DTB file */
++				retval = snprintf(DTBAddr, sizeof(DTBAddr), "0x%08lx", (ulong)(startaddress + le32_to_host(mod->Module_Location)));
++				if( (retval < 0) || ((unsigned int)retval >= sizeof(DTBAddr)) )
++				{
++					printf("Buffer overflow, this is not possible, retval = 0x%x !!!\n", retval);
++					retval = -1;
++					return retval;
++				}
++				else
++				{
++					printf("Found DTB @ /dev/mtdblock%d Address %s\n", RootMtdNo, DTBAddr);
++					retval = 0;
++				}
++			}
++		}
++#endif
+ #ifdef CONFIG_BOOTLOGO_SUPPORT
+ 		if ((le16_to_host(mod->Module_Type) == MODULE_BOOTLOGO))
+ 		{
+@@ -1280,7 +1314,25 @@
+ 			sprintf(AddrStr,"0x%lx",ExecuteAddr);
+ 			argv[0] = &Command[0];
+ 			argv[1] = &AddrStr[0];
++#ifdef CONFIG_OF_LIBFDT
++			/* If FMH already has DTB then in FMH scan we would have found the same
++			 * and that address can be passed as third argument to 'bootm' command,
++			 * also need to make sure CONFIG_OF_LIBFDT support is enabled in UBoot
++			 * before passing the arguments, otherwise this command will fail to
++			 * recognize the DTB file */
++			if( strlen(DTBAddr) != 0 )
++			{
++				argv[2] = "-";
++				argv[3] = &DTBAddr[0];
++				argv[4] = NULL;
++			}
++			else
++			{
++				argv[2] = NULL;
++			}
++#else
+ 			argv[2] = NULL;
++#endif 
+ 		}
+ 		else
+ 		{
+@@ -1288,8 +1340,27 @@
+ 			sprintf(INITRDAddrStr,"0x%lx",initrd_address);
+ 			argv[0] = &Command[0];
+ 			argv[1] = &AddrStr[0];
++#ifdef CONFIG_OF_LIBFDT
++			/* If FMH already has DTB then in FMH scan we would have found the same
++			 * and that address can be passed as third argument to 'bootm' command,
++			 * also need to make sure CONFIG_OF_LIBFDT support is enabled in UBoot
++			 * before passing the arguments, otherwise this command will fail to
++			 * recognize the DTB file */
++			if( strlen(DTBAddr) != 0 )
++			{
++				argv[2] = &INITRDAddrStr[0];
++				argv[3] = &DTBAddr[0];
++				argv[4] = NULL;
++			}
++			else
++			{
++				argv[2] = &INITRDAddrStr[0];
++				argv[3] = NULL;
++			}
++#else
+ 			argv[2] = &INITRDAddrStr[0];
+ 			argv[3] = NULL;
++#endif 
+ 		}
+ 
+ 		/* If module is a ELF Executable */
+@@ -1312,12 +1383,36 @@
+ 				console_assign(stdout,"nulldev");
+ 			if(rootisinitrd != 1)
+ 			{
++#ifdef CONFIG_OF_LIBFDT
++				/* If DTB address found, pass it to bootm command */
++				if( strlen(DTBAddr) != 0 )
++				{
++					retval = do_bootm(NULL,0,4,argv);
++				}
++				else
++				{
++					retval = do_bootm(NULL,0,2,argv);
++				}
++#else
+ 				retval =  do_bootm(NULL,0,2,argv);
++#endif 
+ 			}
+ 			else
+ 			{
+ 				setenv("initrd_high","off");
++	#ifdef CONFIG_OF_LIBFDT
++				/* If DTB address found, pass it to bootm command */
++				if( strlen(DTBAddr) != 0 )
++				{
++					retval = do_bootm(NULL,0,4,argv);
++				}
++				else
++				{
++					retval = do_bootm(NULL,0,3,argv);
++				}
++#else
+ 				retval = do_bootm(NULL,0,3,argv);
++#endif 
+ 			}
+ 			console_assign(stdout,"serial");
+ 			printf("Failed\n");
+@@ -1406,7 +1501,43 @@
+ 	{
+ 		return retval;
+ 	}
++#ifdef CONFIG_OF_LIBFDT
++	argv[0] = "ext4load";
++	argv[1] = "mmc";
++	argv[2] = &partition[0]; /* It is assumed that boot partition will be in slot 0 */
++	argv[3] = &AddrStr[0];
++	argv[4] = KERNEL_FILE;
++	argv[5] = NULL;
+ 
++	if(do_ext4_load(NULL,0,5,argv) == 0)
++	{
++		retval = snprintf(AddrStr2,128,"0x%x",CONFIG_SYS_LOAD_DTB_ADDR);
++		if(retval < 0 || retval >= 128)
++		{
++			printf("Buffer Overflow\n");
++			return retval;
++		}
++		argv[0] = "ext4load";
++		argv[1] = "mmc";
++		argv[2] = &partition[0]; /* It is assumed that boot partition will be in slot 0 */
++		argv[3] = &AddrStr2[0];
++		argv[4] = KERNEL_DTB;
++		argv[5] = NULL;
++
++		if(do_ext4_load(NULL,0,5,argv) == 0)
++		{
++			argv[0] = &Command[0];
++			argv[1] = &AddrStr[0];
++			argv[2] = "-";
++			argv[3] = &AddrStr2[0];
++			argv[4] = NULL;
++			retval = do_bootm(NULL,0,4,argv);
++			console_assign(stdout,"serial");
++			printf("Failed\n");
++			return retval;
++		}
++	}
++#else
+ 	argv[0] = "ext4load";
+ 	argv[1] = "mmc";
+ 	argv[2] = &partition[0]; /* It is assumed that boot partition will be in slot 0 */
+@@ -1424,6 +1555,7 @@
+ 		printf("Failed\n");
+ 		return retval;
+ 	}
++#endif
+ 	console_assign(stdout,"nulldev");
+ 	printf("Unable to locate %s\n",KERNEL_FILE);
+ 	UpdateFirmware();
